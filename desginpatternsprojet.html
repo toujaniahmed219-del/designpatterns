@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Néon Défenseur : Le Siège du Château</title>
+    <style>
+        body { background: #050508; color: #00ffcc; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; align-items: center; margin: 0; overflow: hidden; }
+        canvas { border: 3px solid #00ffcc; box-shadow: 0 0 30px #0055ff; background: radial-gradient(circle, #111 0%, #000 100%); margin-top: 20px; }
+        .stats { display: flex; gap: 30px; font-size: 24px; margin-top: 20px; text-transform: uppercase; letter-spacing: 2px; }
+        .controls { margin-top: 15px; color: #ff00ff; font-weight: bold; background: rgba(255, 255, 255, 0.1); padding: 10px 20px; border-radius: 20px; text-align: center; }
+        #gold { color: #ffd700; }
+        #lives { color: #ff4d4d; }
+    </style>
+</head>
+<body>
+
+    <div class="stats">
+        <span>Or: <span id="gold">150</span></span>
+        <span>Santé Château: <span id="lives">100</span>%</span>
+        <span>Vague: <span id="wave">1</span>/15</span>
+    </div>
+    <canvas id="gameCanvas" width="900" height="500"></canvas>
+    <div class="controls">
+        Placement (50 Or) : Zone Bleue uniquement | Améliorer (30 Or) : Clic sur Troupe<br>
+        <small style="color: #00ffcc; font-size: 0.8em;">Les ennemis attaquent vos troupes s'ils les croisent !</small>
+    </div>
+
+<script>
+/**
+ * 1. SINGLETON : Gestionnaire de Jeu
+ */
+const MoteurJeu = (function() {
+    let instance;
+    return {
+        getInstance: function() {
+            if (!instance) {
+                instance = {
+                    or: 150,
+                    santeChateau: 100,
+                    vagueActuelle: 1,
+                    tours: [],
+                    projectiles: [],
+                    etat: "JEU",
+                    zonePlacement: { xMin: 150, xMax: 700 } // Zone limitée pour plus de challenge
+                };
+            }
+            return instance;
+        }
+    };
+})();
+
+const jeu = MoteurJeu.getInstance();
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+/**
+ * 2. FACTORY : Création des Virus (Ennemis)
+ */
+class UsineEnnemis {
+    static creerEnnemi(type, y, xOffset = 0) {
+        const base = { x: -50 - xOffset, y: y, recompense: 25, cibleAttaque: null };
+        if (type === 'boss') {
+            return { ...base, hp: 2500, maxHp: 2500, speed: 0.4, color: '#ffffff', size: 70, isBoss: true, degats: 1.5 };
+        }
+        if (type === 'rapide') {
+            return { ...base, hp: 30, maxHp: 30, speed: 2.8, color: '#ffff00', size: 18, degats: 0.3 };
+        }
+        return { ...base, hp: 60, maxHp: 60, speed: 1.5, color: '#ff0055', size: 28, degats: 0.5 };
+    }
+}
+
+/**
+ * 3. COMPOSITE : Gestion des vagues
+ */
+class GroupeEnnemis {
+    constructor(numVague) {
+        this.membres = [];
+        if (numVague > 15) {
+            this.membres.push(UsineEnnemis.creerEnnemi('boss', 220));
+        } else {
+            let nombre = 6 + numVague * 2;
+            for(let i=0; i < nombre; i++) {
+                const type = (numVague > 4 && Math.random() > 0.7) ? 'rapide' : 'normal';
+                this.membres.push(UsineEnnemis.creerEnnemi(type, 80 + Math.random() * 340, i * 70));
+            }
+        }
+    }
+    estVide() { return this.membres.length === 0; }
+}
+
+/**
+ * 4. DECORATOR : Amélioration des Troupes
+ */
+class Tour {
+    constructor(x, y) {
+        this.x = x; this.y = y;
+        this.hp = 60; this.maxHp = 60;
+        this.portee = 140;
+        this.cadence = 40; 
+        this.cooldown = 0;
+        this.couleur = '#00ffcc';
+        this.degats = 12;
+        this.estAmelioree = false;
+    }
+    dessiner() {
+        ctx.shadowBlur = 15; ctx.shadowColor = this.couleur;
+        ctx.fillStyle = this.couleur;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, 15, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "white";
+        ctx.strokeRect(this.x - 20, this.y - 20, 40, 40);
+        // Barre de vie de la troupe
+        ctx.fillStyle = "#333"; ctx.fillRect(this.x - 20, this.y - 30, 40, 4);
+        ctx.fillStyle = "#00ff00"; ctx.fillRect(this.x - 20, this.y - 30, (this.hp/this.maxHp) * 40, 4);
+        ctx.shadowBlur = 0;
+    }
+}
+
+function DecorateurElite(tour) {
+    tour.cadence = 18;
+    tour.couleur = '#ff00ff';
+    tour.degats = 18;
+    tour.hp = 120; tour.maxHp = 120;
+    tour.estAmelioree = true;
+    return tour;
+}
+
+function emettreSon(f, t, v) {
+    try {
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = audioCtx.createOscillator();
+        const g = audioCtx.createGain();
+        osc.type = t; osc.frequency.value = f;
+        g.gain.setValueAtTime(v, audioCtx.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.1);
+        osc.connect(g); g.connect(audioCtx.destination);
+        osc.start(); osc.stop(audioCtx.currentTime + 0.1);
+    } catch(e) {}
+}
+
+let vagueActuelle = new GroupeEnnemis(jeu.vagueActuelle);
+
+/**
+ * 5. STATE & LOOP
+ */
+function bouclePrincipale() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (jeu.etat === "JEU") {
+        // --- DESSIN DU DECOR ---
+        // Zone de placement (indication visuelle)
+        ctx.fillStyle = "rgba(0, 85, 255, 0.1)";
+        ctx.fillRect(jeu.zonePlacement.xMin, 0, jeu.zonePlacement.xMax - jeu.zonePlacement.xMin, canvas.height);
+        
+        // Le Château
+        ctx.fillStyle = "#222";
+        ctx.fillRect(820, 40, 80, 420);
+        ctx.strokeStyle = "#00ffcc";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(820, 40, 80, 420);
+        ctx.fillStyle = "#00ffcc";
+        ctx.font = "bold 16px Arial";
+        ctx.fillText("CHÂTEAU", 822, 30);
+
+        // Fond grille
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = '#112233';
+        for(let i=0; i<canvas.width; i+=50) { ctx.beginPath(); ctx.moveTo(i,0); ctx.lineTo(i,canvas.height); ctx.stroke(); }
+
+        // --- LOGIQUE ENNEMIS ---
+        vagueActuelle.membres.forEach((ennemi, idx) => {
+            // IA d'attaque : cherche une tour proche pour s'arrêter et attaquer
+            let tourCible = jeu.tours.find(t => Math.hypot(t.x - ennemi.x, t.y - ennemi.y) < 40);
+            
+            if (tourCible) {
+                tourCible.hp -= ennemi.degats;
+                if (Math.random() > 0.98) emettreSon(100, 'sawtooth', 0.05);
+            } else {
+                ennemi.x += ennemi.speed;
+            }
+            
+            // Dessin Ennemi
+            ctx.fillStyle = ennemi.color;
+            ctx.shadowBlur = 10; ctx.shadowColor = ennemi.color;
+            ctx.fillRect(ennemi.x, ennemi.y, ennemi.size, ennemi.size);
+            
+            // Barre de vie ennemi
+            ctx.fillStyle = '#333'; ctx.fillRect(ennemi.x, ennemi.y - 10, ennemi.size, 5);
+            ctx.fillStyle = '#00ff00'; ctx.fillRect(ennemi.x, ennemi.y - 10, (ennemi.hp/ennemi.maxHp) * ennemi.size, 5);
+
+            // Collision Château
+            if (ennemi.x > 820) {
+                jeu.santeChateau -= (ennemi.isBoss ? 50 : 10);
+                vagueActuelle.membres.splice(idx, 1);
+                emettreSon(150, 'sawtooth', 0.2);
+            }
+            // Mort Ennemi
+            if (ennemi.hp <= 0) {
+                jeu.or += ennemi.recompense;
+                vagueActuelle.membres.splice(idx, 1);
+                emettreSon(300, 'sine', 0.1);
+            }
+        });
+
+        // --- LOGIQUE TOURS (TROUPES) ---
+        jeu.tours = jeu.tours.filter(t => t.hp > 0); // Supprimer troupes mortes
+        jeu.tours.forEach(t => {
+            t.dessiner();
+            t.cooldown--;
+            if (t.cooldown <= 0) {
+                const cible = vagueActuelle.membres.find(e => Math.hypot(e.x - t.x, e.y - t.y) < t.portee);
+                if (cible) {
+                    jeu.projectiles.push({x: t.x, y: t.y, tx: cible.x + cible.size/2, ty: cible.y + cible.size/2, vie: 5});
+                    cible.hp -= t.degats;
+                    t.cooldown = t.cadence;
+                    emettreSon(800, 'square', 0.02);
+                }
+            }
+        });
+
+        // Lasers
+        ctx.lineWidth = 2;
+        jeu.projectiles.forEach((p, i) => {
+            ctx.strokeStyle = "#fff";
+            ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.tx, p.ty); ctx.stroke();
+            p.vie--;
+            if (p.vie <= 0) jeu.projectiles.splice(i, 1);
+        });
+
+        // Changement de vague
+        if (vagueActuelle.estVide()) {
+            if (jeu.vagueActuelle > 15) {
+                jeu.etat = "VICTOIRE";
+            } else {
+                jeu.vagueActuelle++;
+                vagueActuelle = new GroupeEnnemis(jeu.vagueActuelle);
+                jeu.or += 60;
+            }
+        }
+
+        if (jeu.santeChateau <= 0) jeu.etat = "DEFAITE";
+
+        document.getElementById('gold').innerText = jeu.or;
+        document.getElementById('lives').innerText = Math.max(0, jeu.santeChateau);
+        document.getElementById('wave').innerText = Math.min(jeu.vagueActuelle, 15);
+
+    } else {
+        // Ecrans de fin
+        ctx.fillStyle = "rgba(0,0,0,0.9)";
+        ctx.fillRect(0,0,canvas.width, canvas.height);
+        ctx.font = "50px Segoe UI";
+        ctx.textAlign = "center";
+        if (jeu.etat === "VICTOIRE") {
+            ctx.fillStyle = "#00ffcc";
+            ctx.fillText("VICTOIRE ! CHÂTEAU SAUVÉ", canvas.width/2, canvas.height/2);
+            ctx.font = "20px Segoe UI";
+            ctx.fillText("Le Virus Alpha a été éradiqué.", canvas.width/2, canvas.height/2 + 60);
+        } else {
+            ctx.fillStyle = "#ff0055";
+            ctx.fillText("LE CHÂTEAU EST TOMBÉ", canvas.width/2, canvas.height/2);
+        }
+    }
+    requestAnimationFrame(bouclePrincipale);
+}
+
+// Interaction
+canvas.addEventListener('click', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    let tourExistante = jeu.tours.find(t => Math.hypot(t.x - x, t.y - y) < 25);
+    
+    if (tourExistante && !tourExistante.estAmelioree && jeu.or >= 30) {
+        DecorateurElite(tourExistante);
+        jeu.or -= 30;
+        emettreSon(1000, 'sine', 0.1);
+    } else if (!tourExistante && jeu.or >= 50) {
+        // Vérification de la zone de placement
+        if (x >= jeu.zonePlacement.xMin && x <= jeu.zonePlacement.xMax) {
+            jeu.tours.push(new Tour(x, y));
+            jeu.or -= 50;
+            emettreSon(500, 'sine', 0.1);
+        } else {
+            // Feedback visuel si hors zone
+            ctx.fillStyle = "rgba(255, 0, 0, 0.3)";
+            ctx.fillRect(0,0,canvas.width, canvas.height);
+        }
+    }
+});
+
+bouclePrincipale();
+</script>
+</body>
+</html>
